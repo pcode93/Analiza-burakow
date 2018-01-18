@@ -1,0 +1,319 @@
+---
+title: "Dlaczego buraczki rosną tak jak rosną?"
+output: html_notebook
+---
+```{r}
+library(randomForest)
+library(caret)
+library(glmnet)
+library(xgboost)
+library(corrplot)
+library(e1071)
+library(DMwR)
+library(fastICA)
+library(rpart)
+```
+
+```{r}
+PCA = FALSE
+ICA = FALSE
+RESAMPLE = FALSE
+MULTICLASS = TRUE
+
+if(MULTICLASS) {
+  numClasses <- 5
+} else {
+  numClasses <- 2
+}
+```
+ 
+```{r}
+DATE_FORMAT <- '%d.%m'
+daysBetween <- function(dates, startDate) {
+  lapply(dates, function(date) {
+    as.numeric(as.Date(date, DATE_FORMAT) - as.Date(startDate, DATE_FORMAT))
+  })
+}
+
+field1 <- read.csv('data/field1.csv', sep = ';')[2:11]
+field1 <- field1[, !(names(field1) %in% ("średnia.odległość"))]
+field1$data.wschodów <- lapply(field1$data.wschodów, function(date) {
+  if(date < 10) {
+    paste(date, ".05", sep = "")
+  } else {
+    paste(date, ".04", sep = "")
+  }
+})
+field1$czas.wschodów <- daysBetween(field1$data.wschodów, '13.04')
+
+field2 <- read.csv('data/field2.csv', sep = ';')[2:10]
+field2$data.wschodów <- lapply(as.character(field2$data.wschodów), function(date) {
+  d = gsub('-maj', '.05', gsub('-kwi', '.04', date))
+  d = gsub('kwi-(.*)', '\\1.04', d)
+  d = gsub('maj-(.*)', '\\1.05', d)
+  d
+})
+names(field2) <- names(field1[1:9])
+field2$czas.wschodów <- daysBetween(field2$data.wschodów, '14.04')
+
+field3 <- read.csv('data/field3.csv', sep = ';')[2:11]
+field3 <- field3[, !(names(field3) %in% ("średnia.odległość"))]
+field3 <- field3[, c(1,2,3,6,7,8,9,4,5)]
+names(field3) <- names(field1[1:9])
+field3$czas.wschodów <- daysBetween(field3$data.wschodów, '15.04')
+
+field4 <- read.csv('data/field4.csv', sep = ';')
+names(field4) <- names(field1[1:9])
+field4$czas.wschodów <- daysBetween(field4$data.wschodów, '22.04')
+
+field5 <- read.csv('data/field5.csv', sep = ';')[1:9]
+names(field5) <- names(field1[1:9])
+field5$czas.wschodów <- daysBetween(field5$data.wschodów, '21.04')
+```
+
+```{r}
+preprocess <- function(df) {
+  scaleValues <- function(df, i) {
+    df[df[[i]] <= 10, i] = df[df[[i]] <= 10, i] * 1000
+    df
+  }
+  
+  df = as.data.frame(apply(df, 2, function(col) {
+    c = as.numeric(gsub(',', '.', as.character(col)))
+    #c[is.na(c$powierzchnia.życiowa)] = mean(c[!is.na(c)])
+    c
+  }))
+  
+  df$mean_dist = as.numeric(lapply(seq(1:nrow(df)), function(i) (df[i+1,]$cm - df[i-1,]$cm)/2))
+  
+  df = df[!is.na(df$powierzchnia.życiowa),]
+  df = df[, 3:11]
+  
+  df = scaleValues(df, 4)
+  df = scaleValues(df, 5)
+  df = scaleValues(df, 6)
+  df = scaleValues(df, 7)
+
+  df = df[!is.na(df$czas.wschodów), ]
+  df[c(8,1,2,3,4,5,6,9,7)]
+}
+```
+
+```{r}
+train <- rbind(preprocess(field1), preprocess(field2), preprocess(field3), preprocess(field4))
+test <- preprocess(field5)
+```
+
+```{r}
+print(head(train))
+meanAndMedian <- function(df) {
+  lapply(df, function(feature) c(mean(feature), median(feature)))
+}
+
+boxplots <- function(df) {
+  lapply(names(df), function(feature) boxplot(df[[feature]], main = feature))
+}
+
+meanAndMedian(train)
+invisible(boxplots(train))
+```
+
+```{r}
+train <- Reduce(function(df, feature) {
+  df[!(df[[feature]] %in% boxplot(df[[feature]], plot = FALSE)$out),]
+},names(train), train)
+
+meanAndMedian(train)
+```
+
+```{r}
+categorical <- function(col) {
+  if(MULTICLASS) {
+    as.factor(as.numeric(lapply(col, function(m) {
+      if(m >= 0 && m < 300) 0 
+      else if(m >= 300 && m < 600) 1
+      else if(m >= 600 && m < 900) 2
+      else if(m >= 900 && m < 1200) 3
+      else 4
+    })))
+    #dataset <- dataset[dataset$m.korzenia != 4,]
+    #dataset$m.korzenia <- as.factor(as.numeric(as.character(dataset$m.korzenia)))
+  } else {
+    as.factor(as.numeric(lapply(col, function(m) {
+      if(abs(m - 1000) >= 150) 0 
+      else 1
+    })))
+  }
+}
+
+train$m.korzenia <- categorical(train$m.korzenia)
+test$m.korzenia <- categorical(test$m.korzenia)
+```
+
+```{r}
+importance(randomForest(formula = m.korzenia ~ ., data = train))
+```
+
+```{r}
+hist(as.numeric(train$m.korzenia))
+```
+
+```{r}
+corrplot(cor(train[1:8]), method = 'number')
+ggplot(train, aes(mean_dist, powierzchnia.życiowa)) + geom_line()
+ggplot(train, aes(X.mk.sąsiada, średnia.masa.2.sąsiadów)) + geom_line()
+```
+
+```{r}
+train <- train[c(1,2,3,4,5,7,9)]
+test <- test[c(1,2,3,4,5,7,9)]
+numFeatures <- length(colnames(train)[colnames(train) != 'm.korzenia'])
+importance(randomForest(formula = m.korzenia ~ ., data = train))
+```
+
+```{r}
+plotFeatures <- function(df, a,b) {
+  colours = c('blue', 'red', 'green', 'yellow', 'purple')
+  
+  Reduce(
+    function(x,y) x + y, 
+    lapply(
+      seq(1:numClasses), 
+      function(i) geom_point(
+        data = df[df$m.korzenia == i - 1,], 
+        aes_string(a,b), 
+        colour = colours[i]
+      )
+    ), 
+    ggplot())
+}
+
+plot(plotFeatures(train, "m.liści", "czas.wschodów"))
+```
+
+```{r}
+  pca = princomp(scale(train[,1:numFeatures]))
+  pairs(pca$scores, col = rainbow(5)[train$m.korzenia], asp = 1)
+  plot(pca$score[,1:2], col = rainbow(5)[train$m.korzenia])
+  print(pca)
+  
+  ica = fastICA(scale(train[,1:numFeatures]), n.comp = numFeatures)
+  pairs(ica$S, col = rainbow(5)[train$m.korzenia], asp = 1)
+  plot(ica$S[,1:2], col = rainbow(5)[train$m.korzenia])
+```
+
+```{r}
+resampleAll <- function(df) {
+  rbind(
+    resampleOne(df, 0, 50),
+    df[df$m.korzenia == 1,],
+    df[df$m.korzenia == 2,],
+    resampleOne(df, 3, 100),
+    resampleOne(df, 4, 300)
+  )
+}
+
+resampleOne <- function(df, class, os) {
+  ova = df
+  
+  ova$m.korzenia = as.factor(as.numeric(lapply(ova$m.korzenia, function(x) {
+    if(x == class) 1
+    else 0
+  })))
+  
+  ova = SMOTE(m.korzenia ~ ., ova,perc.under = 100, perc.over = os)
+
+  ova$m.korzenia = as.numeric(as.character(ova$m.korzenia))
+  ova$m.korzenia = factor(ova$m.korzenia, levels = seq(1:numClasses) - 1)
+  ova$m.korzenia[ova$m.korzenia == 1] = class
+  
+  ova[ova$m.korzenia == class,]
+}
+```
+
+```{r}
+createFold <- function(df) {
+  testIndex = sample(1:nrow(df), nrow(df) * 0.2)
+  
+  trainFold = df[-testIndex,]
+  testFold = df[testIndex,]
+  
+  # OPTIONAL: RESAMPLE
+  if(RESAMPLE) {
+    trainFold = resampleAll(trainFold)
+  }
+  
+  # OPTIONAL: USE PCA
+  if(PCA) {
+    center = sapply(trainFold[,1:numFeatures], mean)
+    scale = sapply(trainFold[,1:numFeatures], sd)
+    
+    pca = princomp(scale(trainFold[,1:numFeatures], center = center, scale = scale))
+    
+    trainFold[,1:numFeatures] = pca$scores
+    testFold[,1:numFeatures] = predict(pca, scale(testFold[,1:numFeatures], center = center, scale = scale))
+  }
+  
+  # OPTIONAL: USE ICA
+  if(ICA) {
+    ica = preProcess(trainFold[,1:numFeatures], method = c('center', 'scale', 'ica'), n.comp = 6)
+    trainFold[,1:numFeatures] = predict(ica, trainFold[,1:numFeatures])
+    testFold[,1:numFeatures] = predict(ica, testFold[,1:numFeatures])
+  }
+  
+  list(train = trainFold, test = testFold)
+}
+```
+
+```{r}
+cv <- function(df, folds, algorithm, ...) {
+  Reduce("+", lapply(seq(1:folds), function(i) {
+    fold = createFold(df)
+    model = algorithm(m.korzenia ~ ., fold$train, ...)
+    confusionMatrix(predict(model, newdata = fold$test), fold$test$m.korzenia)$overall[1]
+  })) / folds
+}
+
+models <- function(df) {
+  folds = 5
+  
+  print("Naive bayes")
+  print(cv(df, folds, naiveBayes))
+  
+  print("SVM RBF: gamma = 0.1")
+  print(cv(df, folds, svm, kernel = 'radial', gamma = 0.1))
+  
+  print("SVM RBF: gamma = 0.5")
+  print(cv(df, folds, svm, kernel = 'radial', gamma = 0.5))
+  
+  print("SVM RBF: gamma = 1")
+  print(cv(df, folds, svm, kernel = 'radial', gamma = 1))
+  
+  print("Random Forest: 500 trees")
+  print(cv(df, folds, randomForest))
+  
+  print("Random Forest: 1000 trees")
+  print(cv(df, folds, randomForest, ntree = 1000))
+  
+  print("Random Forest: 2000 trees")
+  print(cv(df, folds, randomForest, ntree = 2000))
+}
+```
+
+```{r}
+models(train)
+```
+
+```{r}
+fullDataset <- rbind(train, test)
+```
+
+```{r}
+rf <- randomForest(m.korzenia ~ ., fullDataset)
+print(importance(rf))
+```
+
+```{r}
+tree <- rpart(m.korzenia ~ ., rbind(train, test), method = "class")
+print(tree)
+```
